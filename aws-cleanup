@@ -1,0 +1,206 @@
+#!/usr/bin/python
+import boto3
+import sys
+import re
+from botocore.exceptions import ClientError, ParamValidationError
+
+unused_volumes = []
+used_volumes = []
+used_images = []
+all_images = []
+unused_images = []
+ec2 = ""
+ec2_client = ""
+
+## ebs functions start
+
+# get list of all EBS volumes
+def get_all_volumes():
+    volumes = ec2.volumes.all() # If you want to list out all volumes
+    return volumes
+
+# print volumes
+def print_volumes(volumes, type=''):
+    if volumes != -1:
+        for volume in volumes:
+            print "ID: {} || state: {} || size: {} || Attachments: {}".format(volume.volume_id, volume.state, volume.size, volume.attachments)
+    else:
+	print "There are no {} volumes to list".format(type)
+
+# set volumes that are not in any instance
+def set_unused_volumes(volumes):
+    global unused_volumes
+    for vol in volumes:
+	if vol.state not in ['in-use', 'attached']:
+	    unused_volumes.append(vol)
+	else:
+	    used_volumes.append(vol)
+    # print 'Unused volumes: ',unused_volumes
+    return unused_volumes if len(unused_volumes) != 0 else -1
+
+# delete unused volumes
+def deleteAllVol():
+	u = raw_input('Are you sure want to delete all volumes (y/n): ')
+	if u in ['y', 'Y']:
+		for v in unused_volumes:
+			v.delete()
+		return "All volumes deleted successfully."
+	else:
+		return -1
+
+def delete_unused_volumes():
+    if len(unused_volumes) == 0:
+    	print 'No unused volume to delete. EMPTY!'
+    	def sayBye():
+    		print "Bye."
+    	return sayBye
+    else: #there are some unused volumes in a list	
+		def deleteVol():
+			for v in unused_volumes:
+				user_input = raw_input("Want to delete - {} {} {}:\n (y / n / All)".format(v.volume_id, v.state, v.size))
+				if user_input in ['y','Y','yes', 'Yes','YES']:
+					if v.delete():
+						print "Volume {} deleted successfully.".format(v.volume_id)
+					else:
+						print "Volume {} deletion failed.".format(v.volume_id)
+				elif user_input in ['n', 'N', 'no', 'No', 'NO']:
+					print "Skipping deleting volume...\n"
+					continue
+				elif user_input in ['all', 'All', 'ALL']:
+					res = deleteAllVol() 
+					print res if res != -1 else ""
+					break
+		return deleteVol
+
+def delete_ebs():
+	print "\n============================================================\n"
+	print "All unsed volumes: "
+	try:
+		print_volumes(set_unused_volumes(get_all_volumes()), 'unused') ## also set unused volumes
+		delete_unused_volumes()()
+	except ClientError as CE:
+		print "(AuthFailure) - Please check you credentials provided.", CE
+	finally:
+		print "Not able to catch exceptions"
+
+## ebs functions done ##
+
+## functions for ami ##
+
+def get_all_instances():
+    all = ec2.instances.all()
+    return all
+
+def set_used_images(instances):
+	global used_images
+	for instance in instances:
+		# print "ID: {}, state: {}, Image: {}, Image_id: {}, instance_id: {}".format(instance.id, instance.state, instance.image, instance.image_id, instance.instance_id)
+		used_images.append(instance.image_id)
+       # print dir(instance)
+
+def get_all_images():
+	print "all images"
+	print ec2.images.filter(Owners=['self'])
+	return ec2.images.filter(Owners=['self']).all()
+
+#using this function for now
+def get_all_images2():
+	return ec2_client.describe_images(Owners=['self'])['Images']
+
+def set_all_images(images):
+	global all_images
+	for img in images:
+		unicodeImageId = unicode('ImageId') # the returned dictionary "img" is unicoded
+		all_images.append(img[unicodeImageId])
+
+
+def delete_unused_images():
+	for img in all_images:
+		if img not in used_images:
+			unused_images.append(img)
+	def deleteImg():
+		if len(unused_images) != 0:
+			for img in unused_images:
+				user_input = raw_input("Want to delete: {} image (y/n/all):  \n".format(img))
+				if user_input in ['y','Y','yes','YES']:
+					if ec2.Image(img).deregister():
+						snapshots_delete_for_instance(img)
+						print "Image {} deleted successfully.".format(img)
+					else:
+						print "Image {} deletion failed.".format(img)
+				elif user_input in ['n', 'N', 'no', 'No', 'NO']:
+					print "Skipping deleting volume...\n"
+					continue
+				elif user_input in ['all', 'All', 'ALL']:
+					res = deleteAllImg() 
+					print res if res != -1 else ""
+					break
+		else:
+			print "No unused images to delete. \n\n"
+	return deleteImg
+
+
+def snapshots_delete_for_instance(instance_id):
+	SnapshotsUnicode = unicode('Snapshots')
+	snapshots = ec2_client.describe_snapshots( OwnerIds=["self"])[SnapshotsUnicode]
+	wordToSearch = re.compile(instance_id)
+	for snapshot in snapshots:
+		snapshotDescriptionUnicode = unicode("Description")
+		snapshotIdUnicode = unicode("SnapshotId")
+		if wordToSearch.search(snapshot[snapshotDescriptionUnicode]):
+			ec2_client.delete_snapshot(SnapshotId=snapshot[snapshotIdUnicode])
+
+# delete unused images
+def deleteAllImg():
+	u = raw_input('Are you sure want to delete all volumes (y/n): ')
+	if u in ['y', 'Y']:
+		for img in unused_images:
+			ec2.Image(img).deregister()
+			snapshots_delete_for_instance(img)
+		return "All Images deleted successfully."
+	else:
+		return -1
+
+def delete_ami():
+	try:
+		set_used_images(get_all_instances())
+		set_all_images(get_all_images2())
+		print "used images"
+		print used_images
+		print "Deleting Images: "
+		delete_unused_images()()
+	except ClientError as CE:
+		print "(AuthFailure) - Please check you credentials provided.", CE
+
+
+
+# execution
+
+print "\n=============================\n"
+
+# print_images(get_all_images().filter(Owners=['self']).all())
+def init():
+	global ec2, ec2_client
+	functionToCall = raw_input('''
+	> press 1 for EBS clearing
+	> press 2 for AMI clearing
+	> press Enter to skip
+	: ''')
+
+	ec2 = boto3.resource('ec2')
+	ec2_client = boto3.client('ec2')
+
+	if functionToCall == '1':
+		delete_ebs()
+
+	if functionToCall == '2':
+		delete_ami()
+
+
+
+init()
+
+
+
+print "exit"
+print "\n=============================\n"
