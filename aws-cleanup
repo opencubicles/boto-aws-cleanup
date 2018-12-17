@@ -1,8 +1,14 @@
+# VERSION DEPENDENCY
+# PYTHON : 2.7
+# BOTO : 3
+
+
 #!/usr/bin/python
 import boto3
 import sys
 import re
 from botocore.exceptions import ClientError, ParamValidationError
+from datetime import datetime, timedelta
 
 unused_volumes = []
 used_volumes = []
@@ -11,6 +17,13 @@ all_images = []
 unused_images = []
 ec2 = ""
 ec2_client = ""
+no_of_days = 0
+
+## new variables
+all_volumes = []
+snapshots = []
+snapshots_with_ami = []
+snapshots_with_ebs = []
 
 ## ebs functions start
 
@@ -27,11 +40,11 @@ def print_volumes(volumes, type=''):
     else:
 	print "There are no {} volumes to list".format(type)
 
-# set volumes that are not in any instance
+# set volumes that are not in any instance and also handels the date logic
 def set_unused_volumes(volumes):
     global unused_volumes
     for vol in volumes:
-	if vol.state not in ['in-use', 'attached']:
+	if vol.state not in ['in-use', 'attached'] and vol.create_time.replace(tzinfo=None).date()<=datetime.utcnow().date() - timedelta(days=no_of_days):
 	    unused_volumes.append(vol)
 	else:
 	    used_volumes.append(vol)
@@ -57,14 +70,14 @@ def delete_unused_volumes():
     else: #there are some unused volumes in a list	
 		def deleteVol():
 			for v in unused_volumes:
-				user_input = raw_input("Want to delete - {} {} {}:\n (y / n / All)".format(v.volume_id, v.state, v.size))
+				user_input = raw_input("> Want to delete - volumeId : {} || state : {} || size : {}:\n> (y / n / All)\n:".format(v.volume_id, v.state, v.size))
 				if user_input in ['y','Y','yes', 'Yes','YES']:
 					if v.delete():
-						print "Volume {} deleted successfully.".format(v.volume_id)
+						print "> Volume {} deleted successfully.".format(v.volume_id)
 					else:
-						print "Volume {} deletion failed.".format(v.volume_id)
+						print "> Volume {} deletion failed.".format(v.volume_id)
 				elif user_input in ['n', 'N', 'no', 'No', 'NO']:
-					print "Skipping deleting volume...\n"
+					print "> Skipping deleting volume...\n"
 					continue
 				elif user_input in ['all', 'All', 'ALL']:
 					res = deleteAllVol() 
@@ -81,22 +94,52 @@ def delete_ebs():
 	except ClientError as CE:
 		print "(AuthFailure) - Please check you credentials provided.", CE
 	finally:
-		print "Not able to catch exceptions"
+		print "Operation completed"
 
 ## ebs functions done ##
 
-## functions for ami ##
+## snapshot functions
+
+def getSnapshotsMapped():
+	snapshots = ec2_client.describe_snapshots( OwnerIds=["self"])['Snapshots']
+	wordToSearch = re.compile('ami')
+	for snapshot in snapshots:
+		if snapshot['StartTime'].replace(tzinfo=None).date()<=datetime.utcnow().date() - timedelta(days=no_of_days):	
+			if wordToSearch.search(snapshot["Description"]): ## set the ami snapshots
+				amiId = extractAmiIdFromSnap(snapshot)
+				if amiId in unused_images:
+					snapshots_with_ami.append(snapshot)
+			else: ## set the ebs snapshots
+				global all_volumes
+				if (snapshot["VolumeId"] not in all_volumes) and snapshot['StartTime'].replace(tzinfo=None).date()<=datetime.utcnow().date() - timedelta(days=no_of_days):
+					snapshots_with_ebs.append(snapshot)
+
+
+def extractAmiIdFromSnap(snapshot):
+	snapshotDescription = snapshot["Description"]
+	amiId = re.search('ami-(.*) from', snapshotDescription)
+	return 'ami-'+amiId.group(1)
+
+
+## function to set all the volumes keys
+def setAllVolumes():
+	global all_volumes
+	volumes = ec2.volumes.all()
+	for volume in volumes:
+		all_volumes.append(volume.volume_id)
+
+## functions to set unused ami
 
 def get_all_instances():
-    all = ec2.instances.all()
-    return all
+	all = ec2.instances.all()
+	return all
 
 def set_used_images(instances):
 	global used_images
 	for instance in instances:
 		# print "ID: {}, state: {}, Image: {}, Image_id: {}, instance_id: {}".format(instance.id, instance.state, instance.image, instance.image_id, instance.instance_id)
 		used_images.append(instance.image_id)
-       # print dir(instance)
+			# print dir(instance)
 
 def get_all_images():
 	print "all images"
@@ -110,82 +153,76 @@ def get_all_images2():
 def set_all_images(images):
 	global all_images
 	for img in images:
-		unicodeImageId = unicode('ImageId') # the returned dictionary "img" is unicoded
-		all_images.append(img[unicodeImageId])
+		all_images.append(img['ImageId'])
 
-
-def delete_unused_images():
+def setUnusedImages():
+	set_used_images(get_all_instances())
+	set_all_images(get_all_images2())
 	for img in all_images:
 		if img not in used_images:
 			unused_images.append(img)
-	def deleteImg():
-		if len(unused_images) != 0:
-			for img in unused_images:
-				user_input = raw_input("Want to delete: {} image (y/n/all):  \n".format(img))
+
+def deleteAllSnapshot():
+	for snapshot in snapshots_with_ebs:
+		ec2_client.delete_snapshot(SnapshotId=snapshot["SnapshotId"])
+	for snapshot in snapshots_with_ami:
+		img = extractAmiIdFromSnap(snapshot)
+		if ec2.Image(img).deregister():
+			ec2_client.delete_snapshot(SnapshotId=snapshot["SnapshotId"])
+
+def deleteSnapshots():
+		if len(snapshots_with_ami) + len(snapshots_with_ebs) != 0:
+			for snapshot in snapshots_with_ami:
+				img = extractAmiIdFromSnap(snapshot)
+				user_input = raw_input("> Want to delete: volumeId - {} || snapshotId - {} \n>It will also delete the ami - {}     (y/n/all)  \n:".format(snapshot['VolumeId'],snapshot['SnapshotId'], img))
 				if user_input in ['y','Y','yes','YES']:
 					if ec2.Image(img).deregister():
-						snapshots_delete_for_instance(img)
-						print "Image {} deleted successfully.".format(img)
+						ec2_client.delete_snapshot(SnapshotId=snapshot["SnapshotId"])
+						print "> Snapshot - {} and corresponding ami - {} deleted successfully.".format(snapshot['SnapshotId'], img)
 					else:
-						print "Image {} deletion failed.".format(img)
+						print "> Image {} deletion failed.".format(snapshot[SnapshotId])
+				elif user_input in ['n', 'N', 'no', 'No', 'NO']:
+					print "> Skipping deleting volume...\n"
+					continue
+				elif user_input in ['all', 'All', 'ALL']:
+					deleteAllSnapshot() 
+					print 'all unused snapshots and corresponding ami deleted'
+					break
+			for snapshot in snapshots_with_ebs:
+				user_input = raw_input("> Want to delete: volumeId - {} || snapshotId - {} \n(y/n/all):  \n".format(snapshot['VolumeId'],snapshot['SnapshotId'], img))
+				if user_input in ['y','Y','yes','YES']:
+					ec2_client.delete_snapshot(SnapshotId=snapshot["SnapshotId"])
+					print "> Image {} deleted successfully.".format(snapshot['SnapshotId'])
 				elif user_input in ['n', 'N', 'no', 'No', 'NO']:
 					print "Skipping deleting volume...\n"
 					continue
 				elif user_input in ['all', 'All', 'ALL']:
-					res = deleteAllImg() 
-					print res if res != -1 else ""
+					deleteAllSnapshot() 
+					print 'all unused snapshots and corresponding ami deleted'
 					break
 		else:
 			print "No unused images to delete. \n\n"
-	return deleteImg
-
-
-def snapshots_delete_for_instance(instance_id):
-	SnapshotsUnicode = unicode('Snapshots')
-	snapshots = ec2_client.describe_snapshots( OwnerIds=["self"])[SnapshotsUnicode]
-	wordToSearch = re.compile(instance_id)
-	for snapshot in snapshots:
-		snapshotDescriptionUnicode = unicode("Description")
-		snapshotIdUnicode = unicode("SnapshotId")
-		if wordToSearch.search(snapshot[snapshotDescriptionUnicode]):
-			ec2_client.delete_snapshot(SnapshotId=snapshot[snapshotIdUnicode])
-
-# delete unused images
-def deleteAllImg():
-	u = raw_input('Are you sure want to delete all volumes (y/n): ')
-	if u in ['y', 'Y']:
-		for img in unused_images:
-			ec2.Image(img).deregister()
-			snapshots_delete_for_instance(img)
-		return "All Images deleted successfully."
-	else:
-		return -1
-
-def delete_ami():
-	try:
-		set_used_images(get_all_instances())
-		set_all_images(get_all_images2())
-		print "used images"
-		print used_images
-		print "Deleting Images: "
-		delete_unused_images()()
-	except ClientError as CE:
-		print "(AuthFailure) - Please check you credentials provided.", CE
-
 
 
 # execution
-
-print "\n=============================\n"
+print "\n===================================================================\n"
 
 # print_images(get_all_images().filter(Owners=['self']).all())
 def init():
-	global ec2, ec2_client
+	global ec2, ec2_client, no_of_days
+	input_days = raw_input('''
+	> Enter number of days before or press enter to select all snapshots
+	: ''')
 	functionToCall = raw_input('''
 	> press 1 for EBS clearing
 	> press 2 for AMI clearing
 	> press Enter to skip
 	: ''')
+
+	if(input_days):
+		no_of_days = int(input_days)
+	else:
+		no_of_days = 0
 
 	ec2 = boto3.resource('ec2')
 	ec2_client = boto3.client('ec2')
@@ -194,9 +231,10 @@ def init():
 		delete_ebs()
 
 	if functionToCall == '2':
-		delete_ami()
-
-
+		setAllVolumes()
+		setUnusedImages()
+		getSnapshotsMapped()
+		deleteSnapshots()
 
 init()
 
