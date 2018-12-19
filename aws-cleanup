@@ -18,12 +18,14 @@ unused_images = []
 ec2 = ""
 ec2_client = ""
 no_of_days = 0
+awsProfile = ""
 
 ## new variables
 all_volumes = []
 snapshots = []
 snapshots_with_ami = []
 snapshots_with_ebs = []
+snapshots_with_deleted_ami = []
 
 ## ebs functions start
 
@@ -109,6 +111,8 @@ def getSnapshotsMapped():
 				amiId = extractAmiIdFromSnap(snapshot)
 				if amiId in unused_images:
 					snapshots_with_ami.append(snapshot)
+				else:
+					snapshots_with_deleted_ami.append(snapshot)
 			else: ## set the ebs snapshots
 				global all_volumes
 				if (snapshot["VolumeId"] not in all_volumes) and snapshot['StartTime'].replace(tzinfo=None).date()<=datetime.utcnow().date() - timedelta(days=no_of_days):
@@ -170,8 +174,20 @@ def deleteAllSnapshot():
 		if ec2.Image(img).deregister():
 			ec2_client.delete_snapshot(SnapshotId=snapshot["SnapshotId"])
 
+def printAllUnusedSnapshots():
+	print "All unused snapshots"
+	for snapshot in snapshots_with_ami:
+		print ">  volumeId - {} || snapshotId - {} \n".format(snapshot['VolumeId'],snapshot['SnapshotId'])
+	for snapshot in snapshots_with_ebs:
+		print ">  volumeId - {} || snapshotId - {} \n".format(snapshot['VolumeId'],snapshot['SnapshotId'])
+	
+	print "======================================================\n"
+
 def deleteSnapshots():
 		if len(snapshots_with_ami) + len(snapshots_with_ebs) != 0:
+			print "\n============================================================\n"
+			printAllUnusedSnapshots()
+
 			for snapshot in snapshots_with_ami:
 				img = extractAmiIdFromSnap(snapshot)
 				user_input = raw_input("> Want to delete: volumeId - {} || snapshotId - {} \n>It will also delete the ami - {}     (y/n/all)  \n:".format(snapshot['VolumeId'],snapshot['SnapshotId'], img))
@@ -188,7 +204,7 @@ def deleteSnapshots():
 					deleteAllSnapshot() 
 					print 'all unused snapshots and corresponding ami deleted'
 					break
-			for snapshot in snapshots_with_ebs:
+			for snapshot in snapshots_with_ebs + snapshots_with_deleted_ami:
 				user_input = raw_input("> Want to delete: volumeId - {} || snapshotId - {} \n(y/n/all):  \n".format(snapshot['VolumeId'],snapshot['SnapshotId'], img))
 				if user_input in ['y','Y','yes','YES']:
 					ec2_client.delete_snapshot(SnapshotId=snapshot["SnapshotId"])
@@ -209,7 +225,10 @@ print "\n===================================================================\n"
 
 # print_images(get_all_images().filter(Owners=['self']).all())
 def init():
-	global ec2, ec2_client, no_of_days
+	global ec2, ec2_client, no_of_days, awsProfile
+	awsProfile = raw_input('''
+	> Enter the aws profile
+	: ''')
 	input_days = raw_input('''
 	> Enter number of days before or press enter to select all snapshots
 	: ''')
@@ -224,8 +243,9 @@ def init():
 	else:
 		no_of_days = 0
 
-	ec2 = boto3.resource('ec2')
-	ec2_client = boto3.client('ec2')
+	session = boto3.Session(profile_name=awsProfile)
+	ec2 = session.resource('ec2')
+	ec2_client = session.client('ec2')
 
 	if functionToCall == '1':
 		delete_ebs()
