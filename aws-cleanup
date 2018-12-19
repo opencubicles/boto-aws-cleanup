@@ -23,9 +23,7 @@ awsProfile = ""
 ## new variables
 all_volumes = []
 snapshots = []
-snapshots_with_ami = []
-snapshots_with_ebs = []
-snapshots_with_deleted_ami = []
+unused_snapshots = []
 
 ## ebs functions start
 
@@ -109,14 +107,10 @@ def getSnapshotsMapped():
 		if snapshot['StartTime'].replace(tzinfo=None).date()<=datetime.utcnow().date() - timedelta(days=no_of_days):	
 			if wordToSearch.search(snapshot["Description"]): ## set the ami snapshots
 				amiId = extractAmiIdFromSnap(snapshot)
-				if amiId in unused_images:
-					snapshots_with_ami.append(snapshot)
-				else:
-					snapshots_with_deleted_ami.append(snapshot)
+				if amiId not in all_images:
+					unused_snapshots.append(snapshot)
 			else: ## set the ebs snapshots
-				global all_volumes
-				if (snapshot["VolumeId"] not in all_volumes) and snapshot['StartTime'].replace(tzinfo=None).date()<=datetime.utcnow().date() - timedelta(days=no_of_days):
-					snapshots_with_ebs.append(snapshot)
+				unused_snapshots.append(snapshot)
 
 
 def extractAmiIdFromSnap(snapshot):
@@ -125,25 +119,7 @@ def extractAmiIdFromSnap(snapshot):
 	return 'ami-'+amiId.group(1)
 
 
-## function to set all the volumes keys
-def setAllVolumes():
-	global all_volumes
-	volumes = ec2.volumes.all()
-	for volume in volumes:
-		all_volumes.append(volume.volume_id)
-
-## functions to set unused ami
-
-def get_all_instances():
-	all = ec2.instances.all()
-	return all
-
-def set_used_images(instances):
-	global used_images
-	for instance in instances:
-		# print "ID: {}, state: {}, Image: {}, Image_id: {}, instance_id: {}".format(instance.id, instance.state, instance.image, instance.image_id, instance.instance_id)
-		used_images.append(instance.image_id)
-			# print dir(instance)
+## functions to set all ami
 
 def get_all_images():
 	print "all images"
@@ -159,53 +135,24 @@ def set_all_images(images):
 	for img in images:
 		all_images.append(img['ImageId'])
 
-def setUnusedImages():
-	set_used_images(get_all_instances())
-	set_all_images(get_all_images2())
-	for img in all_images:
-		if img not in used_images:
-			unused_images.append(img)
 
 def deleteAllSnapshot():
-	for snapshot in snapshots_with_ebs:
+	for snapshot in unused_snapshots:
 		ec2_client.delete_snapshot(SnapshotId=snapshot["SnapshotId"])
-	for snapshot in snapshots_with_ami:
-		img = extractAmiIdFromSnap(snapshot)
-		if ec2.Image(img).deregister():
-			ec2_client.delete_snapshot(SnapshotId=snapshot["SnapshotId"])
 
 def printAllUnusedSnapshots():
 	print "All unused snapshots"
-	for snapshot in snapshots_with_ami:
+	for snapshot in unused_snapshots:
 		print ">  volumeId - {} || snapshotId - {} \n".format(snapshot['VolumeId'],snapshot['SnapshotId'])
-	for snapshot in snapshots_with_ebs:
-		print ">  volumeId - {} || snapshotId - {} \n".format(snapshot['VolumeId'],snapshot['SnapshotId'])
-	
 	print "======================================================\n"
 
 def deleteSnapshots():
-		if len(snapshots_with_ami) + len(snapshots_with_ebs) != 0:
+		if len(unused_snapshots) != 0:
 			print "\n============================================================\n"
 			printAllUnusedSnapshots()
 
-			for snapshot in snapshots_with_ami:
-				img = extractAmiIdFromSnap(snapshot)
-				user_input = raw_input("> Want to delete: volumeId - {} || snapshotId - {} \n>It will also delete the ami - {}     (y/n/all)  \n:".format(snapshot['VolumeId'],snapshot['SnapshotId'], img))
-				if user_input in ['y','Y','yes','YES']:
-					if ec2.Image(img).deregister():
-						ec2_client.delete_snapshot(SnapshotId=snapshot["SnapshotId"])
-						print "> Snapshot - {} and corresponding ami - {} deleted successfully.".format(snapshot['SnapshotId'], img)
-					else:
-						print "> Image {} deletion failed.".format(snapshot[SnapshotId])
-				elif user_input in ['n', 'N', 'no', 'No', 'NO']:
-					print "> Skipping deleting volume...\n"
-					continue
-				elif user_input in ['all', 'All', 'ALL']:
-					deleteAllSnapshot() 
-					print 'all unused snapshots and corresponding ami deleted'
-					break
-			for snapshot in snapshots_with_ebs + snapshots_with_deleted_ami:
-				user_input = raw_input("> Want to delete: volumeId - {} || snapshotId - {} \n(y/n/all):  \n".format(snapshot['VolumeId'],snapshot['SnapshotId'], img))
+			for snapshot in unused_snapshots:
+				user_input = raw_input("> Want to delete: volumeId - {} || snapshotId - {} \n(y/n/all):  \n".format(snapshot['VolumeId'],snapshot['SnapshotId']))
 				if user_input in ['y','Y','yes','YES']:
 					ec2_client.delete_snapshot(SnapshotId=snapshot["SnapshotId"])
 					print "> Image {} deleted successfully.".format(snapshot['SnapshotId'])
@@ -251,8 +198,7 @@ def init():
 		delete_ebs()
 
 	if functionToCall == '2':
-		setAllVolumes()
-		setUnusedImages()
+		set_all_images(get_all_images2())
 		getSnapshotsMapped()
 		deleteSnapshots()
 
